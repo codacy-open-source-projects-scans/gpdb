@@ -1,0 +1,112 @@
+CREATE EXTENSION tsm_system_time;
+CREATE TABLE test_tablesample (id int, name text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Greenplum Database data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+INSERT INTO test_tablesample SELECT i, repeat(i::text, 1000)
+  FROM generate_series(0, 30) s(i);
+ANALYZE test_tablesample;
+-- It's a bit tricky to test SYSTEM_TIME in a platform-independent way.
+-- We can test the zero-time corner case ...
+SELECT count(*) FROM test_tablesample TABLESAMPLE system_time (0);
+ count 
+-------
+     0
+(1 row)
+
+-- ... and we assume that this will finish before running out of time:
+SELECT count(*) FROM test_tablesample TABLESAMPLE system_time (100000);
+ count 
+-------
+    31
+(1 row)
+
+-- bad parameters should get through planning, but not execution:
+EXPLAIN (COSTS OFF)
+SELECT id FROM test_tablesample TABLESAMPLE system_time (-1);
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Sample Scan on test_tablesample
+         Sampling: system_time ('-1'::double precision)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+SELECT id FROM test_tablesample TABLESAMPLE system_time (-1);
+ERROR:  sample collection time must not be negative
+-- fail, this method is not repeatable:
+SELECT * FROM test_tablesample TABLESAMPLE system_time (10) REPEATABLE (0);
+ERROR:  tablesample method system_time does not support REPEATABLE
+LINE 1: SELECT * FROM test_tablesample TABLESAMPLE system_time (10) ...
+                                                   ^
+-- since it's not repeatable, we expect a Materialize node in these plans:
+EXPLAIN (COSTS OFF)
+SELECT * FROM
+  (VALUES (0),(100000)) v(time),
+  LATERAL (SELECT COUNT(*) FROM test_tablesample
+           TABLESAMPLE system_time (100000)) ss;
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Nested Loop
+   ->  Values Scan on "*VALUES*"
+   ->  Materialize
+         ->  Finalize Aggregate
+               ->  Gather Motion 3:1  (slice1; segments: 3)
+                     ->  Partial Aggregate
+                           ->  Materialize
+                                 ->  Sample Scan on test_tablesample
+                                       Sampling: system_time ('100000'::double precision)
+ Optimizer: Postgres-based planner
+(10 rows)
+
+SELECT * FROM
+  (VALUES (0),(100000)) v(time),
+  LATERAL (SELECT COUNT(*) FROM test_tablesample
+           TABLESAMPLE system_time (100000)) ss;
+  time  | count 
+--------+-------
+      0 |    31
+ 100000 |    31
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM
+  (VALUES (0),(100000)) v(time),
+  LATERAL (SELECT COUNT(*) FROM test_tablesample
+           TABLESAMPLE system_time (time)) ss;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Nested Loop
+   ->  Values Scan on "*VALUES*"
+   ->  Materialize
+         ->  Finalize Aggregate
+               ->  Gather Motion 3:1  (slice1; segments: 3)
+                     ->  Partial Aggregate
+                           ->  Materialize
+                                 ->  Sample Scan on test_tablesample
+                                       Sampling: system_time ("*VALUES*".column1)
+ Optimizer: Postgres-based planner
+(10 rows)
+
+-- XXX: LATERAL support is limited in GPDB. So, the following errors out. Also,
+-- setting nested loop off doesn't force a change in the plan shape unfortunately.
+SELECT * FROM
+  (VALUES (0),(100000)) v(time),
+  LATERAL (SELECT COUNT(*) FROM test_tablesample
+           TABLESAMPLE system_time (time)) ss;
+ERROR:  illegal rescan of motion node: invalid plan (nodeMotion.c:1272)
+HINT:  Likely caused by bad NL-join, try setting enable_nestloop to off
+CREATE VIEW vv AS
+  SELECT * FROM test_tablesample TABLESAMPLE system_time (20);
+EXPLAIN (COSTS OFF) SELECT * FROM vv;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Sample Scan on test_tablesample
+         Sampling: system_time ('20'::double precision)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+DROP EXTENSION tsm_system_time;  -- fail, view depends on extension
+ERROR:  cannot drop extension tsm_system_time because other objects depend on it
+DETAIL:  view vv depends on function system_time(internal)
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.

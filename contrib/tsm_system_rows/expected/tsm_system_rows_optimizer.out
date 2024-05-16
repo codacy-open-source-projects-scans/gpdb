@@ -1,0 +1,88 @@
+CREATE EXTENSION tsm_system_rows;
+CREATE TABLE test_tablesample (id int, name text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Greenplum Database data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+INSERT INTO test_tablesample SELECT i, repeat(i::text, 1000)
+  FROM generate_series(0, 30) s(i);
+ANALYZE test_tablesample;
+SELECT count(*) FROM test_tablesample TABLESAMPLE system_rows (0);
+ count 
+-------
+     0
+(1 row)
+
+SELECT count(*) FROM test_tablesample TABLESAMPLE system_rows (1);
+ count 
+-------
+     1
+(1 row)
+
+SELECT count(*) FROM test_tablesample TABLESAMPLE system_rows (10);
+ count 
+-------
+    10
+(1 row)
+
+SELECT count(*) FROM test_tablesample TABLESAMPLE system_rows (100);
+ count 
+-------
+    31
+(1 row)
+
+-- bad parameters should get through planning, but not execution:
+EXPLAIN (COSTS OFF)
+SELECT id FROM test_tablesample TABLESAMPLE system_rows (-1);
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Sample Scan on test_tablesample
+         Sampling: system_rows ('-1'::bigint)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+SELECT id FROM test_tablesample TABLESAMPLE system_rows (-1);
+ERROR:  sample size must not be negative
+-- fail, this method is not repeatable:
+SELECT * FROM test_tablesample TABLESAMPLE system_rows (10) REPEATABLE (0);
+ERROR:  tablesample method system_rows does not support REPEATABLE
+LINE 1: SELECT * FROM test_tablesample TABLESAMPLE system_rows (10) ...
+                                                   ^
+-- but a join should be allowed:
+EXPLAIN (COSTS OFF)
+SELECT * FROM
+  (VALUES (0),(10),(100)) v(nrows),
+  LATERAL (SELECT count(*) FROM test_tablesample
+           TABLESAMPLE system_rows (nrows)) ss;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Nested Loop
+   ->  Values Scan on "*VALUES*"
+   ->  Materialize
+         ->  Finalize Aggregate
+               ->  Gather Motion 3:1  (slice1; segments: 3)
+                     ->  Partial Aggregate
+                           ->  Sample Scan on test_tablesample
+                                 Sampling: system_rows ("*VALUES*".column1)
+ Optimizer: Postgres-based planner
+(9 rows)
+
+-- XXX: LATERAL support is limited in GPDB. So, the following errors out. Also,
+-- setting nested loop off doesn't force a change in the plan shape unfortunately.
+SELECT * FROM
+  (VALUES (0),(10),(100)) v(nrows),
+  LATERAL (SELECT count(*) FROM test_tablesample
+           TABLESAMPLE system_rows (nrows)) ss;
+ERROR:  illegal rescan of motion node: invalid plan (nodeMotion.c:1272)
+HINT:  Likely caused by bad NL-join, try setting enable_nestloop to off
+CREATE VIEW vv AS
+  SELECT count(*) FROM test_tablesample TABLESAMPLE system_rows (20);
+SELECT * FROM vv;
+ count 
+-------
+    20
+(1 row)
+
+DROP EXTENSION tsm_system_rows;  -- fail, view depends on extension
+ERROR:  cannot drop extension tsm_system_rows because other objects depend on it
+DETAIL:  view vv depends on function system_rows(internal)
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.

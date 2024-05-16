@@ -1,0 +1,3 @@
+-- database binswap_connect will be re-created after swapping, ignore it
+\! pg_dumpall -f dump_current.sql --exclude-database=binswap_connect
+\! echo $?

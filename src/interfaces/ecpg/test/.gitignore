@@ -1,0 +1,10 @@
+/pg_regress
+/GPTest.pm
+/atmsort.pm
+/explain.pm
+/gpdiff.pl
+/gpstringsubs.pl
+# Exclude subdirectories
+/log/
+/results/
+/tmp_check/

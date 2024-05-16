@@ -1,0 +1,13 @@
+# ignores only for this directory
+/external_table.sql
+/fts_manual_probe.sql
+/gp_collation.sql
+/pg_basebackup.sql
+/pg_basebackup_with_tablespaces.sql
+/pt_io_in_progress_deadlock.sql
+/distributed_snapshot.sql
+/hot_standby/query_conflict.sql
+
+# ignores including sub-directories
+autovacuum-analyze.sql
+workfile_mgr_test.sql

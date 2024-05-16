@@ -1,0 +1,382 @@
+Block Range Indexes (BRIN)
+==========================
+
+BRIN indexes intend to enable very fast scanning of extremely large tables.
+
+The essential idea of a BRIN index is to keep track of summarizing values in
+consecutive groups of heap pages (page ranges); for example, the minimum and
+maximum values for datatypes with a btree opclass, or the bounding box for
+geometric types.  These values can be used to avoid scanning such pages
+during a table scan, depending on query quals.
+
+The cost of this is having to update the stored summary values of each page
+range as tuples are inserted into them.
+
+
+Access Method Design
+--------------------
+
+Since item pointers are not stored inside indexes of this type, it is not
+possible to support the amgettuple interface.  Instead, we only provide
+amgetbitmap support.  The amgetbitmap routine returns a lossy TIDBitmap
+comprising all pages in those page ranges that match the query
+qualifications.  The recheck step in the BitmapHeapScan node prunes tuples
+that are not visible according to the query qualifications.
+
+An operator class must have the following entries:
+
+- generic support procedures (pg_amproc), identical to all opclasses:
+  * "opcinfo" (BRIN_PROCNUM_OPCINFO) initializes a structure for index
+    creation or scanning
+  * "addValue" (BRIN_PROCNUM_ADDVALUE) takes an index tuple and a heap item,
+    and possibly changes the index tuple so that it includes the heap item
+    values
+  * "consistent" (BRIN_PROCNUM_CONSISTENT) takes an index tuple and query
+    quals, and returns whether the index tuple values match the query quals.
+  * "union" (BRIN_PROCNUM_UNION) takes two index tuples and modifies the first
+    one so that it represents the union of the two.
+Procedure numbers up to 10 are reserved for future expansion.
+
+Additionally, each opclass needs additional support functions:
+- Minmax-style operator classes:
+  * Proc numbers 11-14 are used for the functions implementing inequality
+    operators for the type, in this order: less than, less or equal,
+    greater or equal, greater than.
+
+Opclasses using a different design will require different additional procedure
+numbers.
+
+Operator classes also need to have operator (pg_amop) entries so that the
+optimizer can choose the index to execute queries.
+- Minmax-style operator classes:
+  * The same operators as btree (<=, <, =, >=, >)
+
+Each index tuple stores some NULL bits and some opclass-specified values, which
+are stored in a single null bitmask of length twice the number of columns.  The
+generic NULL bits indicate, for each column:
+  * bt_hasnulls: Whether there's any NULL value at all in the page range
+  * bt_allnulls: Whether all values are NULLs in the page range
+
+The opclass-specified values are:
+- Minmax-style operator classes
+  * minimum value across all tuples in the range
+  * maximum value across all tuples in the range
+
+Note that the addValue and Union support procedures  must be careful to
+datumCopy() the values they want to store in the in-memory BRIN tuple, and
+must pfree() the old copies when replacing older ones.  Since some values
+referenced from the tuple persist and others go away, there is no
+well-defined lifetime for a memory context that would make this automatic.
+
+
+The Range Map
+-------------
+
+To find the index tuple for a particular page range, we have an internal
+structure we call the range map, or "revmap" for short.  This stores one TID
+per page range, which is the address of the index tuple summarizing that
+range.  Since the map entries are fixed size, it is possible to compute the
+address of the range map entry for any given heap page by simple arithmetic.
+
+When a new heap tuple is inserted in a summarized page range, we compare the
+existing index tuple with the new heap tuple.  If the heap tuple is outside
+the summarization data given by the index tuple for any indexed column (or
+if the new heap tuple contains null values but the index tuple indicates
+there are no nulls), the index is updated with the new values.  In many
+cases it is possible to update the index tuple in-place, but if the new
+index tuple is larger than the old one and there's not enough space in the
+page, it is necessary to create a new index tuple with the new values.  The
+range map can be updated quickly to point to it; the old index tuple is
+removed.
+
+If the range map points to an invalid TID, the corresponding page range is
+considered to be not summarized.  When tuples are added to unsummarized
+pages, nothing needs to happen.
+
+To scan a table following a BRIN index, we scan the range map sequentially.
+This yields index tuples in ascending page range order.  Query quals are
+matched to each index tuple; if they match, each page within the page range
+is returned as part of the output TID bitmap.  If there's no match, they are
+skipped.  Range map entries returning invalid index TIDs, that is
+unsummarized page ranges, are also returned in the TID bitmap.
+
+The revmap is stored in the first few blocks of the index main fork,
+immediately following the metapage.  Whenever the revmap needs to be
+extended by another page, existing tuples in that page are moved to some
+other page.
+
+Heap tuples can be removed from anywhere without restriction.  It might be
+useful to mark the corresponding index tuple somehow, if the heap tuple is
+one of the constraining values of the summary data (i.e. either min or max
+in the case of a btree-opclass-bearing datatype), so that in the future we
+are aware of the need to re-execute summarization on that range, leading to
+a possible tightening of the summary values.
+
+Summarization
+-------------
+
+At index creation time, the whole table is scanned; for each page range the
+summarizing values of each indexed column and nulls bitmap are collected and
+stored in the index.  The partially-filled page range at the end of the
+table is also summarized.
+
+As new tuples get inserted at the end of the table, they may update the
+index tuple that summarizes the partial page range at the end.  Eventually
+that page range is complete and new tuples belong in a new page range that
+hasn't yet been summarized.  Those insertions do not create a new index
+entry; instead, the page range remains unsummarized until later.
+
+Whenever VACUUM is run on the table, all unsummarized page ranges are
+summarized.  This action can also be invoked by the user via
+brin_summarize_new_values().  Both these procedures scan all the
+unsummarized ranges, and create a summary tuple.  Again, this includes the
+partially-filled page range at the end of the table.
+
+Vacuuming
+---------
+
+Since no heap TIDs are stored in a BRIN index, it's not necessary to scan the
+index when heap tuples are removed.  It might be that some summary values can
+be tightened if heap tuples have been deleted; but this would represent an
+optimization opportunity only, not a correctness issue.  It's simpler to
+represent this as the need to re-run summarization on the affected page range
+rather than "subtracting" values from the existing one.  This is not
+currently implemented.
+
+Note that if there are no indexes on the table other than the BRIN index,
+usage of maintenance_work_mem by vacuum can be decreased significantly, because
+no detailed index scan needs to take place (and thus it's not necessary for
+vacuum to save TIDs to remove).  It's unlikely that BRIN would be the only
+indexes in a table, though, because primary keys can be btrees only, and so
+we don't implement this optimization.
+
+
+Optimizer
+---------
+
+The optimizer selects the index based on the operator class' pg_amop
+entries for the column.
+
+
+Future improvements
+-------------------
+
+* Different-size page ranges?
+  In the current design, each "index entry" in a BRIN index covers the same
+  number of pages.  There's no hard reason for this; it might make sense to
+  allow the index to self-tune so that some index entries cover smaller page
+  ranges, if this allows the summary values to be more compact.  This would incur
+  larger BRIN overhead for the index itself, but might allow better pruning of
+  page ranges during scan.  In the limit of one index tuple per page, the index
+  itself would occupy too much space, even though we would be able to skip
+  reading the most heap pages, because the summary values are tight; in the
+  opposite limit of a single tuple that summarizes the whole table, we wouldn't
+  be able to prune anything even though the index is very small.  This can
+  probably be made to work by using the range map as an index in itself.
+
+* More compact representation for TIDBitmap?
+  TIDBitmap is the structure used to represent bitmap scans.  The
+  representation of lossy page ranges is not optimal for our purposes, because
+  it uses a Bitmapset to represent pages in the range; since we're going to return
+  all pages in a large range, it might be more convenient to allow for a
+  struct that uses start and end page numbers to represent the range, instead.
+
+* Better vacuuming?
+  It might be useful to enable passing more useful info to BRIN indexes during
+  vacuuming about tuples that are deleted, i.e. do not require the callback to
+  pass each tuple's TID.  For instance we might need a callback that passes a
+  block number instead of a TID.  That would help determine when to re-run
+  summarization on blocks that have seen lots of tuple deletions.
+
+
+GPDB:
+
+(1) Main design problem:
+
+BRIN needs special handling for append-optimized tables. The revmap relies on
+the assumption that block numbers are consecutive, there are no gaps in the
+sequence of block numbers for a given relation. This assumption does not hold
+for append-optimized tables. The AO tid is comprised of
+<segment file number, row number>. Concurrent inserts into an AO table result in
+multiple segment files, one per insert, being populated.
+
+The existing revmap structure is simple in the sense that it is easy to
+calculate the block number for a revmap page (the block layout is always:
+{meta page, [revmap pages], [data pages]}). The number of revmap pages is
+directly proportional to the logical heap block numbers we are covering in the
+index.
+
+If we continue with this representation, we will have to create revmap entries
+for all the nonexistent TIDs in this gap, leading to large amounts of wasted
+space. For example in a simple AO table with segment 1, having 10 logical heap
+blocks: [33554432, 33554441], we would have to create revmap pages covering the
+range [0, 33554431], and if pages_per_range = 1, that would mean creating close
+to (33554432 / REVMAP_PAGE_MAXITEMS) = (33554432 / 5456) ~= 6150 revmap pages!
+And an AO/CO table can have 128 such segments!
+
+We discuss how we change the internal structure for the metapage and revmap to
+tackle this problem (See Section (3)).
+
+There is also the question is how can we ensure that most of the code between
+heap and AO/CO tables is unified. Section (2) describes how we tackle that
+through the introduction of new table AM APIs and BlockSequences.
+
+(2) BlockSequences and Table AM APIs:
+
+We have introduced a new table AM API relation_get_block_sequences() that helps
+unify code for block-based iteration for BRIN scan and summarization, in a
+table AM agnostic manner.
+
+At its heart is the critical observation that BRIN indexes deal with chunks of
+the tid space, represented in units of heap blocks. The resultant heap block
+boundaries are physical for heap tables, but are logical for AO/CO tables
+(AO/CO tables may have holes in the tid space due to how rownumber allocation
+is done). BRIN conceptually operates on these logical boundaries for tid
+selection, and we fully exploit that.
+
+A contiguous set of these logical heap blocks is what we term as BlockSequences.
+Two BlockSequences may not be contiguous, but are contiguous within themselves.
+The table AM API expects that we return a set of such BlockSequences. Heap
+tables have only 1 block sequence, whereas AO/CO tables have 1 block sequence
+per aoseg/aocsseg. See BlockSequence for more details.
+
+Once we have the list of BlockSequences, we introduce an outer loop for
+iterating over these. Within the outer loop the existing upstream loop is
+leveraged. This applies to both bringetbitmap() and brinsummarize().
+
+Sometimes, an alternative API is also needed: to get the block sequence, given
+a logical heap block number. For that purpose, we have introduced
+relation_get_block_sequence().
+
+(3) Changes to the internal page structure:
+
+BRIN data pages remain unchanged. Only the metapage and revmap pages undergo a
+change in structure, in order to deal with the main design problem highlighted
+in Section (1). Also, these changes are made only for AO/CO tables - for heap
+table,s the fields added to the internal structures are unused.
+
+We completely break away from the restriction that the revmap pages follow one
+another right after the metapage, in contiguous block numbers. Instead, we now
+have them point to one another in a singly linked list. We have introduced the
+nextRevmapPage pointer in BrinSpecialSpace to this end.
+
+Note: Since revmap pages are not contiguous, we don't have to follow the page
+evacuation protocol (that we have to follow for indexes on heap tables), which
+had to move data pages to the end of the index relation, to make room for
+revmap pages.
+
+Furthermore, there are up to MAX_AOREL_CONCURRENCY such linked lists of revmap
+pages. There is one list per block sequence. The heads and tails of these lists
+(or chains) are maintained in the metapage (and cached in the revmap access
+struct).
+
+We have depicted the logical chain structure below:
+
+                               +----------+
+                               |     meta |
+                               |          |
+                               |          |
+                               +-----+----+
+                                     |
+                    +----------------+------------------+
+                seq0|            seq1|       ...    seqN|
+                    |                |                  |
+               +----v-----+    +-----v----+       +-----v----+
+               |      rev |    |      rev |       |      rev |
+               |    +--+--+    |    +--+--+       |    +--+--+
+               |    | 1|  |    |    | 1|  |       |    | 1|  |
+               +----+--++-+    +----+--++-+       +----+--++-+
+                        |               |                  |
+                        |               |                  |
+               +--------v-+    +--------v-+       +--------v-+
+               |      rev |    |      rev |       |      rev |
+               |    +--+--+    |    +--+--+       |    +--+--+
+               |    | 2|  |    |    | 2|  |       |    | 2|  |
+               +----+--++-+    +----+--++-+       +----+--++-+
+                        |               |                  |
+                        v               v                  v
+                   ...
+               +----------+    +----------+       +----------+
+               |      rev |    |      rev |       |      rev |
+               |    +--+--+    |    +--+--+       |    +--+--+
+               |    |n1|  |    |    |n2|  |       |    |nN|  |
+               +----+--+--+    +----+--+--+       +----+--+--+
+
+Omitted from the diagram are the tail pointers to the revmap chains and the
+data pages, for clarity.
+
+Since revmap pages are no longer contiguous for AO/CO tables, we have to
+additionally maintain logical page numbers (in the BrinSpecialSpace) for all
+revmap pages (depicted in the diagram above). The need can be highlighted with
+the following example:
+
+For heap tables, let's say we have metapage: Block0 and revmap pages: Block1,2,3
+and let's say we have pages_per_range = 1. If we wanted to look up the summary
+info for heapBlk=6000, that would map to Block3 (we know that from simple math.
+See: HEAPBLK_TO_REVMAP_BLK()). However, for AO/CO tables, we have no idea what
+revmap block number this would map to since revmap pages are not contiguous.
+This is where the 1-based logical page number comes in. With it we can say,
+heapBlk 6000 maps to the 2nd revmap page for block sequence 9 (seg0)
+(See: HEAPBLK_TO_REVMAP_PAGENUM_AO()). We can then traverse the revmap chain for
+seg0 until we find the revmap page with pagenum=2.
+
+These logical page numbers are used for both iterating over the revmap during
+scans and also while extending the revmap (see revmap_extend_and_get_blkno_ao()).
+The logical revmap page number for a given logical heap block is calculated by
+paying attention to the segment to which the logical heap block belongs and the
+fixed number of items that can fit in a revmap page (See
+HEAPBLK_TO_REVMAP_PAGENUM_AO()). The logical page numbers of the last chain
+members are also cached in the metapage (and cached in the revmap access struct)
+
+For operations such as scan, build and summarize:
+We always traverse each chain in order justifying their singly-linked-ness.
+Also these chains are always traversed in block sequence order - the chain for
+seg0 is traversed, chain for seg1 and so on. We use a revmap iterator to attain
+this goal. Before traversing each chain, we position the iterator at the start
+of the chain.
+
+We never have to lock more than 1 revmap page at a time during chain traversal.
+Only for revmap extension, do we have to lock two revmap pages: the last revmap
+page in the chain and the new revmap page being added.
+
+For operations such as insert, we make use of the chain tail pointer in the
+metapage. Due to the appendonly nature of AO/CO tables, we would always write to
+the last logical heap block within a block sequence. Thus, unlike for heap,
+blocks other than the last block would never be summarized as a result of an
+insert. So, we can safely position the revmap iterator at the end of the chain
+(instead of traversing the chain unnecessarily from the front).
+
+Note: Multiple revmap pages across chains can map to the same data page.
+
+(4) Default pages_per_range:
+For heap tables, we have decided to scale back the default to 32, since in GPDB
+one heap block is 4x the default size in PG.
+
+For AO/CO tables, since many more tuples fit in 1 logical heap block as opposed
+to heap (for e.g. the tpch lineitem table will have at most 248 tuples/block,
+whereas an AO/CO table is bound to have 32768 tuples/block).
+Having a default of 32 will thus be counter-productive - CPU processing cost
+from unwanted tuples will far outweigh any IO cost savings and will dominate the
+total cost of the query (as per planner cost estimation).
+Thus, we use the lowest default possible: a default value of 1.
+
+(5) VACUUM:
+
+For BRIN indexes on AO/CO tables, we exploit a property of exhausted logical
+block ranges (fast sequence numbers used up) belonging to a segment that
+undergoes VACUUM (i.e. a segment awaiting drop). The property is that these
+ranges will never be reused for future inserts.
+
+This is because we don't reset gp_fastsequence when we VACUUM AO/CO tables and
+gp_fastsequence is always increasing.
+
+So, these ranges are effectively dead and can thus be marked as empty. Doing so
+brings about a couple of benefits:
+(1) These dead ranges will never result in false positives when their summaries
+match scan keys - we will not bloat the output tidbitmap unnecessarily.
+(2) Cycles will not be spent trying to summarize them, as empty ranges are not
+summarized. This saves cycles for both the summarization call at the end of
+VACUUM and for all future summarization calls.
+
+We mark these ranges as empty in the brinbulkdelete callback, which is called
+when we are sure that it is safe to recycle a segment awaiting drop.

@@ -1,0 +1,21 @@
+-- verify that resource group gucs all exist,
+-- in case any of them are removed by accident.
+-- do not care about the values / ranges / types
+-- start_ignore
+\! gpconfig -s gp_resource_group_cpu_priority;
+Values on all segments are consistent
+GUC              : gp_resource_group_cpu_priority
+Coordinator value: 10
+Segment     value: 10
+-- end_ignore
+\! echo $?;
+0
+-- start_ignore
+\! gpconfig -s gp_resource_group_cpu_limit;
+Values on all segments are consistent
+GUC              : gp_resource_group_cpu_limit
+Coordinator value: 0.9
+Segment     value: 0.9
+-- end_ignore
+\! echo $?;
+0
