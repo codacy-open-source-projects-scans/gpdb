@@ -33,7 +33,8 @@ try:
     from gppylib.operations.startSegments import MIRROR_MODE_MIRRORLESS
     from gppylib.system import configurationInterface, configurationImplGpdb
     from gppylib.system.environment import GpCoordinatorEnvironment
-    from gppylib.gpcatalog import COORDINATOR_ONLY_TABLES
+    from gppylib.gpcatalog import COORDINATOR_ONLY_TABLES_MAPPED
+    from gppylib.gpcatalog import COORDINATOR_ONLY_TABLES_NON_MAPPED
     from gppylib.operations.package import SyncPackages
     from gppylib.programs.clsRecoverSegment_triples import get_segments_with_running_basebackup
     from gppylib.operations.utils import ParallelOperation
@@ -1430,11 +1431,13 @@ class gpexpand:
         self.pool.check_results()
 
         """
-        Build the list of delete statements based on the COORDINATOR_ONLY_TABLES
-        defined in gpcatalog.py
+        Build the list of DELETE and TRUNCATE statements based on the subset of
+        COORDINATOR_ONLY_TABLES defined in gpcatalog.py. Mapped tables cannot
+        be TRUNCATEd, and we will have DELETE from them.
         """
-        statements = ["delete from pg_catalog.%s" % tab for tab in COORDINATOR_ONLY_TABLES]
-
+        delete_statements = ["delete from pg_catalog.%s" % tab for tab in COORDINATOR_ONLY_TABLES_MAPPED]
+        truncate_statements = ["truncate pg_catalog.%s" % tab for tab in COORDINATOR_ONLY_TABLES_NON_MAPPED]
+        statements = delete_statements + truncate_statements
         """
           Connect to each database in the new segments, and clean up the catalog tables.
         """
@@ -2010,12 +2013,22 @@ class gpexpand:
         """
 
         # get GUC value
-        sql = "show gp_interconnect_proxy_addresses;"
         conn = dbconn.connect(_gp_expand.dburl, encoding='UTF8')
-        icproxy_addresses_string = dbconn.queryRow(conn, sql)[0].strip()
-        sql = "show gp_interconnect_type;"
-        ic_type = dbconn.queryRow(conn, sql)[0].strip()
-        conn.close()
+        try:
+            sql = "show gp_interconnect_proxy_addresses;"
+            icproxy_addresses_string = dbconn.queryRow(conn, sql)[0].strip()
+            sql = "show gp_interconnect_type;"
+            ic_type = dbconn.queryRow(conn, sql)[0].strip()
+        except DatabaseError as e:
+            if re.search('unrecognized configuration parameter', str(e)):
+                # no gp_interconnect_proxy_addresses in a distribution without `ENABLE_IC_PROXY`
+                # it means no need to check the proxy addresses, let's return directly
+                return
+            raise Exception("failed to query in validate_icproxy_addr, database error: %s" % str(e))
+        except Exception as e:
+            raise Exception("failed to query in validate_icproxy_addr, exception: %s" % str(e))
+        finally:
+            conn.close()
 
         # check if newly added dbid exists in gp_interconnect_proxy_addresses
         need_prompt = False

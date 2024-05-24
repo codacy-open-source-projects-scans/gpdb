@@ -1433,9 +1433,9 @@ When you specify `eager_free`, Greenplum Database distributes memory among opera
 
 > **Note** The `gp_resgroup_memory_query_fixed_mem` server configuration parameter is enforced only when resource group-based resource management is active.
 
-Specifies a fixed amount of memory, in MB, reserved for all queries in a resource group **for the scope of a session**. When this parameter is set to `0`, the default, the `MEMORY_LIMIT` resource group attribute determines this memory limit instead. 
+Specifies a fixed amount of memory, in MB, reserved for all queries in a resource group **for the scope of a session**. When this parameter is set to `0`, the default, the `MEMORY_QUOTA` resource group attribute determines this instead. 
 
-While `MEMORY LIMIT` applies to queries across sessions, `gp_resgroup_memory_query_fixed_mem` overrides that limit at a session level. Thus, you can use this configuration parameter to adjust query memory budget for a particular session, on an ad hoc basis. 
+While `MEMORY_QUOTA` applies to queries across sessions, `gp_resgroup_memory_query_fixed_mem` overrides that limit at a session level. Thus, you can use this configuration parameter to adjust query memory budget for a particular session, on an ad hoc basis. 
 
 The value of `gp_resgroup_memory_query_fixed_mem` must be lower than `max_statement_mem`.
 
@@ -2376,20 +2376,6 @@ You can set this parameter only in the `postgresql.conf` file or on the server c
 |-----------|-------|-------------------|
 |2 - `MAX_KILOBYTES` (integer) |1024|local, system, reload|
 
-## <a id="memory_spill_ratio"></a>memory\_spill\_ratio 
-
-> **Note** The `memory_spill_ratio` server configuration parameter is enforced only when resource group-based resource management is active.
-
-Sets the memory usage threshold percentage for memory-intensive operators in a transaction. When a transaction reaches this threshold, it spills to disk.
-
-The default `memory_spill_ratio` percentage is the value defined for the resource group assigned to the currently active role. You can set `memory_spill_ratio` at the session level to selectively set this limit on a per-query basis. For example, if you have a specific query that spills to disk and requires more memory, you may choose to set a larger `memory_spill_ratio` to increase the initial memory allocation.
-
-You can specify an integer percentage value from 0 to 100 inclusive. If you specify a value of 0, Greenplum Database uses the [`statement_mem`](#statement_mem) server configuration parameter value to control the initial query operator memory amount.
-
-|Value Range|Default|Set Classifications|
-|-----------|-------|-------------------|
-|0 - 100|20|coordinator, session, reload|
-
 ## <a id="min_wal_size"></a>min\_wal\_size
 
 Sets the minimum size to which to shrink the WAL. As long as WAL disk usage stays below this setting, Greenplum Database always recycles old WAL files for future use at a checkpoint, rather than remove them. You can use this parameter to ensure that enough WAL space is reserved to handle spikes in WAL usage, for example when running large batch jobs.
@@ -3250,9 +3236,9 @@ You can use the following calculation to estimate a reasonable `statement_mem` v
 
 *If you are using resource groups to control resource allocation in your Greenplum Database cluster*:
 
-- If the server configuration parameter [gp_resgroup_memory_query_fixed_mem](#gp_resgroup_memory_query_fixed_mem) is set to 0, and the resource group parameter `MEMORY_LIMIT` is set to -1, `statement_mem` sets the amount of memory allocated for a query.
+- If the server configuration parameter [gp_resgroup_memory_query_fixed_mem](#gp_resgroup_memory_query_fixed_mem) is set to 0, and the resource group parameter `MEMORY_QUOTA` is set to -1, `statement_mem` sets the amount of memory allocated for a query.
 - If you set the configuration parameters [gp_resource_group_bypass](#gp_resource_group_bypass) or [gp_resource_group_bypass_catalog_query](#gp_resource_group_bypass_catalog_query) to bypass the resource group limits, `statement_mem` sets the amount of memory allocated for the query.
-- `statement_mem` also sets the amount of memory allocated for a query if its value is greater than `MEMORY_LIMIT` / `CONCURRENCY`.
+- `statement_mem` also sets the amount of memory allocated for a query if its value is greater than `MEMORY_QUOTA` / `CONCURRENCY`.
 - Queries whose plan cost is less than the limit `MIN_COST` use `statement_mem` as their memory quota.
 
 *If you are using resource queues to control resource allocation in your Greenplum Database cluster*:
