@@ -16,7 +16,6 @@ service Agent {
     rpc UpdatePgConf(UpdatePgConfRequest) returns (UpdatePgConfRespoonse) {}
     rpc PgBasebackup(PgBasebackupRequest) returns (PgBasebackupResponse) {}
     rpc GetHostName(GetHostNameRequest) returns(GetHostNameReply){}
-    rpc RemoveDirectory(RemoveDirectoryRequest) returns(RemoveDirectoryReply) {}
 }
 
 message GetHostNameReply{
@@ -106,9 +105,3 @@ message PgBasebackupRequest {
 }
 
 message PgBasebackupResponse {}
-
-message RemoveDirectoryRequest {
-    string dataDirectory = 1; 
-}
-
-message RemoveDirectoryReply {}

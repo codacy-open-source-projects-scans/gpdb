@@ -39,7 +39,7 @@
  *    unordered.  The set operation is performed on the QE as if it were 
  *    sequential.
  *
- * PSETOP_SEQUENTIAL_OUTERQUERY
+ * PSETOP_SEQUENTIAL_QE
  *    Similar to SEQUENTIAL_QD/QE, but the output must be made available
  *    to the outer query's locus. We don't know the outer query's locus yet,
  *    but we treat it sequential.
@@ -59,7 +59,7 @@ typedef enum GpSetOpType
 } GpSetOpType;
 
 extern 
-GpSetOpType choose_setop_type(List *pathlist, List *tlist_list);
+GpSetOpType choose_setop_type(List *pathlist);
 
 extern
 void adjust_setop_arguments(PlannerInfo *root, List *pathlist, List *tlist_list, GpSetOpType setop_type);

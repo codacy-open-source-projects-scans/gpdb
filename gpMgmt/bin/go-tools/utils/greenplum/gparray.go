@@ -2,7 +2,6 @@ package greenplum
 
 import (
 	"fmt"
-	"sort"
 
 	_ "github.com/lib/pq"
 
@@ -213,20 +212,12 @@ func getSegmentPairsFromContentMap(contentMap map[int][]Segment) ([]SegmentPair,
 		}
 	}
 
-	// sort all the content IDs so that we can loop through the map in a sorted manner
-	contentList := make([]int, 0, len(contentMap))
-	for content := range contentMap {
-		contentList = append(contentList, content)
-	}
-	sort.Ints(contentList)
-
 	switch segsPerContent {
 	case 0:
 		return nil, fmt.Errorf("invalid configuration, no segments found")
 
 	case 1:
-		for _, content := range contentList {
-			segs := contentMap[content]
+		for content, segs := range contentMap {
 			if !segs[0].IsActingPrimary() {
 				return nil, fmt.Errorf("invalid configuration, no primary segment found for content %d", content)
 			}
@@ -235,8 +226,7 @@ func getSegmentPairsFromContentMap(contentMap map[int][]Segment) ([]SegmentPair,
 		}
 
 	case 2:
-		for _, content := range contentList {
-			segs := contentMap[content]
+		for content, segs := range contentMap {
 			if segs[0].IsActingPrimary() && segs[1].IsActingMirror() {
 				pairs = append(pairs, SegmentPair{Primary: &segs[0], Mirror: &segs[1]})
 			} else if segs[0].IsActingMirror() && segs[1].IsActingPrimary() {

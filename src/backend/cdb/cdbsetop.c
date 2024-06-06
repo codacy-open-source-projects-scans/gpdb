@@ -39,15 +39,13 @@
  * See the comments in cdbsetop.h for discussion of types of setop plan.
  */
 GpSetOpType
-choose_setop_type(List *pathlist, List *tlist_list)
+choose_setop_type(List *pathlist)
 {
 	ListCell   *cell;
-	ListCell   *tlistcell;
 	bool		ok_general = true;
 	bool		ok_partitioned = true;
 	bool		ok_single_qe = true;
 	bool		has_partitioned = false;
-	bool 		all_resjunk = true;
 
 	Assert(Gp_role == GP_ROLE_DISPATCH || Gp_role == GP_ROLE_UTILITY);
 
@@ -94,27 +92,9 @@ choose_setop_type(List *pathlist, List *tlist_list)
 		}
 	}
 
-	/*
-	 * This is for handling the case when there is no targetList in the ouput.
-	 * For example: select from generate_series(1,10) except select from a;
-	 */
-	foreach(tlistcell, tlist_list)
-	{
-		List	   *subtlist = (List *) lfirst(tlistcell);
-		foreach(cell, subtlist)
-		{
-			TargetEntry *tle = (TargetEntry *) lfirst(cell);
-			if (!tle->resjunk)
-			{
-				all_resjunk = false;
-				break;
-			}
-		}
-	}
-
 	if (ok_general)
 		return PSETOP_GENERAL;
-	else if (ok_partitioned && has_partitioned && !all_resjunk)
+	else if (ok_partitioned && has_partitioned)
 		return PSETOP_PARALLEL_PARTITIONED;
 	else if (ok_single_qe)
 		return PSETOP_SEQUENTIAL_QE;
