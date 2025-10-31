@@ -1,0 +1,149 @@
+--
+-- Hash partitioning.
+--
+-- Use hand-rolled hash functions and operator classes to get predictable
+-- result on different machines.  See the definitions of
+-- part_part_test_int4_ops and part_test_text_ops in insert.sql.
+CREATE TABLE mchash (a int, b text, c jsonb)
+  PARTITION BY HASH (a part_test_int4_ops, b part_test_text_ops);
+CREATE TABLE mchash1
+  PARTITION OF mchash FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+-- invalid OID, no such table
+SELECT satisfies_hash_partition(0, 4, 0, NULL);
+ERROR:  could not open relation with OID 0
+DETAIL:  This can be validly caused by a concurrent delete operation on this object.
+-- not partitioned
+SELECT satisfies_hash_partition('tenk1'::regclass, 4, 0, NULL);
+ERROR:  "tenk1" is not a hash partitioned table
+-- partition rather than the parent
+SELECT satisfies_hash_partition('mchash1'::regclass, 4, 0, NULL);
+ERROR:  "mchash1" is not a hash partitioned table
+-- invalid modulus
+SELECT satisfies_hash_partition('mchash'::regclass, 0, 0, NULL);
+ERROR:  modulus for hash partition must be an integer value greater than zero
+-- remainder too small
+SELECT satisfies_hash_partition('mchash'::regclass, 1, -1, NULL);
+ERROR:  remainder for hash partition must be an integer value greater than or equal to zero
+-- remainder too large
+SELECT satisfies_hash_partition('mchash'::regclass, 1, 1, NULL);
+ERROR:  remainder for hash partition must be less than modulus
+-- modulus is null
+SELECT satisfies_hash_partition('mchash'::regclass, NULL, 0, NULL);
+ satisfies_hash_partition 
+--------------------------
+ f
+(1 row)
+
+-- remainder is null
+SELECT satisfies_hash_partition('mchash'::regclass, 4, NULL, NULL);
+ satisfies_hash_partition 
+--------------------------
+ f
+(1 row)
+
+-- too many arguments
+SELECT satisfies_hash_partition('mchash'::regclass, 4, 0, NULL::int, NULL::text, NULL::json);
+ERROR:  number of partitioning columns (2) does not match number of partition keys provided (3)
+-- too few arguments
+SELECT satisfies_hash_partition('mchash'::regclass, 3, 1, NULL::int);
+ERROR:  number of partitioning columns (2) does not match number of partition keys provided (1)
+-- wrong argument type
+SELECT satisfies_hash_partition('mchash'::regclass, 2, 1, NULL::int, NULL::int);
+ERROR:  column 2 of the partition key has type "text", but supplied value is of type "integer"
+-- ok, should be false
+SELECT satisfies_hash_partition('mchash'::regclass, 4, 0, 0, ''::text);
+ satisfies_hash_partition 
+--------------------------
+ f
+(1 row)
+
+-- ok, should be true
+SELECT satisfies_hash_partition('mchash'::regclass, 4, 0, 2, ''::text);
+ satisfies_hash_partition 
+--------------------------
+ t
+(1 row)
+
+-- argument via variadic syntax, should fail because not all partitioning
+-- columns are of the correct type
+SELECT satisfies_hash_partition('mchash'::regclass, 2, 1,
+								variadic array[1,2]::int[]);
+ERROR:  column 2 of the partition key has type "text", but supplied value is of type "integer"
+-- multiple partitioning columns of the same type
+CREATE TABLE mcinthash (a int, b int, c jsonb)
+  PARTITION BY HASH (a part_test_int4_ops, b part_test_int4_ops);
+-- now variadic should work, should be false
+SELECT satisfies_hash_partition('mcinthash'::regclass, 4, 0,
+								variadic array[0, 0]);
+ satisfies_hash_partition 
+--------------------------
+ f
+(1 row)
+
+-- should be true
+SELECT satisfies_hash_partition('mcinthash'::regclass, 4, 0,
+								variadic array[0, 1]);
+ satisfies_hash_partition 
+--------------------------
+ t
+(1 row)
+
+-- wrong length
+SELECT satisfies_hash_partition('mcinthash'::regclass, 4, 0,
+								variadic array[]::int[]);
+ERROR:  number of partitioning columns (2) does not match number of partition keys provided (0)
+-- wrong type
+SELECT satisfies_hash_partition('mcinthash'::regclass, 4, 0,
+								variadic array[now(), now()]);
+ERROR:  column 1 of the partition key has type "integer", but supplied value is of type "timestamp with time zone"
+-- check satisfies_hash_partition passes correct collation
+create table text_hashp (a text) partition by hash (a);
+create table text_hashp0 partition of text_hashp for values with (modulus 2, remainder 0);
+create table text_hashp1 partition of text_hashp for values with (modulus 2, remainder 1);
+-- The result here should always be true, because 'xxx' must belong to
+-- one of the two defined partitions
+select satisfies_hash_partition('text_hashp'::regclass, 2, 0, 'xxx'::text) OR
+	   satisfies_hash_partition('text_hashp'::regclass, 2, 1, 'xxx'::text) AS satisfies;
+ satisfies 
+-----------
+ t
+(1 row)
+
+-- cleanup
+DROP TABLE mchash;
+DROP TABLE mcinthash;
+DROP TABLE text_hashp;
+-- Test case for AO Hash partitioning table
+-- https://github.com/greenplum-db/gpdb/pull/17280
+CREATE TABLE tbl_17280(c0 int) PARTITION BY HASH(c0) WITH (appendonly=true);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'c0' as the Greenplum Database data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+CREATE INDEX idx_17280 ON tbl_17280 USING HASH(c0) WHERE (c0!=0);
+-- should not panic
+SELECT count(*) FROM tbl_17280;
+ count 
+-------
+     0
+(1 row)
+
+create table tbl_17280_p1 partition of tbl_17280 for values with (modulus 2, remainder 0) WITH (appendonly=true);
+NOTICE:  table has parent, setting distribution columns to match parent table
+create table tbl_17280_p2 partition of tbl_17280 for values with (modulus 2, remainder 1) WITH (appendonly=true);
+NOTICE:  table has parent, setting distribution columns to match parent table
+insert into tbl_17280 select generate_series(1,1000);
+set optimizer to off;
+set enable_seqscan to off;
+analyze tbl_17280_p1;
+-- should use bitmap index scan
+explain select c0 from tbl_17280_p1 where c0=12;
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Gather Motion 1:1  (slice1; segments: 1)  (cost=4.01..8.04 rows=1 width=4)
+   ->  Bitmap Heap Scan on tbl_17280_p1  (cost=4.01..8.02 rows=1 width=4)
+         Recheck Cond: (c0 = 12)
+         ->  Bitmap Index Scan on tbl_17280_p1_c0_idx  (cost=0.00..4.01 rows=1 width=0)
+               Index Cond: (c0 = 12)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+DROP TABLE tbl_17280;

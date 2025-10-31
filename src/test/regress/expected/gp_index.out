@@ -1,0 +1,344 @@
+-- start_matchsubs
+-- Note: In init_file there is a regex which will remove any line including
+-- "Distributed by", so we cannot check the result e.g. "Distributed by (i)".
+-- This regex is to overwrite the regex.
+-- m/Distributed by/
+-- s/Distributed by/Distributedby/
+-- end_matchsubs
+--
+-- Greenplum disallows concurrent index creation. It allows concurrent index
+-- drops, so we want to test for it. Though, due to this difference with
+-- upstream we can not keep the tests completely in sync and we add them here.
+-- Original tests are in create_index.sql
+--
+CREATE TABLE tbl_drop_ind_concur (f1 text, f2 text, dk text) distributed by (dk);
+CREATE INDEX tbl_drop_index1 ON tbl_drop_ind_concur(f2,f1);
+INSERT INTO tbl_drop_ind_concur VALUES  ('a','b', '1');
+INSERT INTO tbl_drop_ind_concur VALUES  ('b','b', '1');
+INSERT INTO tbl_drop_ind_concur VALUES  ('c','c', '2');
+INSERT INTO tbl_drop_ind_concur VALUES  ('d','d', '3');
+CREATE UNIQUE INDEX tbl_drop_index2 ON tbl_drop_ind_concur(dk, f1);
+CREATE INDEX tbl_drop_index3 on tbl_drop_ind_concur(f2) WHERE f1='a';
+CREATE INDEX tbl_drop_index4 on tbl_drop_ind_concur(f2) WHERE f1='x';
+DROP INDEX CONCURRENTLY "tbl_drop_index2";				-- works
+DROP INDEX CONCURRENTLY IF EXISTS "tbl_drop_index2";		-- notice
+NOTICE:  index "tbl_drop_index2" does not exist, skipping
+-- failures
+DROP INDEX CONCURRENTLY "tbl_drop_index2", "tbl_drop_index3";
+ERROR:  DROP INDEX CONCURRENTLY does not support dropping multiple objects
+BEGIN;
+DROP INDEX CONCURRENTLY "tbl_drop_index4";
+ERROR:  DROP INDEX CONCURRENTLY cannot run inside a transaction block
+ROLLBACK;
+-- successes
+DROP INDEX CONCURRENTLY IF EXISTS "tbl_drop_index3";
+DROP INDEX CONCURRENTLY "tbl_drop_index4";
+DROP INDEX CONCURRENTLY "tbl_drop_index1";
+\d tbl_drop_ind_concur
+       Table "public.tbl_drop_ind_concur"
+ Column | Type | Collation | Nullable | Default 
+--------+------+-----------+----------+---------
+ f1     | text |           |          | 
+ f2     | text |           |          | 
+ dk     | text |           |          | 
+Distributed by: (dk)
+
+DROP TABLE tbl_drop_ind_concur;
+-- Creating UNIQUE/PRIMARY KEY index is disallowed to change the distribution
+-- keys implicitly
+CREATE TABLE tbl_create_index(i int, j int, k int) distributed by(i, j);
+-- should fail
+CREATE UNIQUE INDEX ON tbl_create_index(i);
+ERROR:  UNIQUE index must contain all columns in the table's distribution key
+DETAIL:  Distribution key column "j" is not included in the constraint.
+CREATE UNIQUE INDEX ON tbl_create_index(k);
+ERROR:  UNIQUE index must contain all columns in the table's distribution key
+DETAIL:  Distribution key column "i" is not included in the constraint.
+CREATE UNIQUE INDEX ON tbl_create_index(i, k);
+ERROR:  UNIQUE index must contain all columns in the table's distribution key
+DETAIL:  Distribution key column "j" is not included in the constraint.
+ALTER TABLE tbl_create_index ADD CONSTRAINT PKEY PRIMARY KEY(i);
+ERROR:  PRIMARY KEY definition must contain all columns in the table's distribution key
+DETAIL:  Distribution key column "j" is not included in the constraint.
+ALTER TABLE tbl_create_index ADD CONSTRAINT PKEY PRIMARY KEY(k);
+ERROR:  PRIMARY KEY definition must contain all columns in the table's distribution key
+DETAIL:  Distribution key column "i" is not included in the constraint.
+ALTER TABLE tbl_create_index ADD CONSTRAINT PKEY PRIMARY KEY(i, k);
+ERROR:  PRIMARY KEY definition must contain all columns in the table's distribution key
+DETAIL:  Distribution key column "j" is not included in the constraint.
+-- should success
+CREATE UNIQUE INDEX tbl_create_index_ij ON tbl_create_index(i, j);
+CREATE UNIQUE INDEX tbl_create_index_ijk ON tbl_create_index(i, j, k);
+\d tbl_create_index
+          Table "public.tbl_create_index"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ i      | integer |           |          | 
+ j      | integer |           |          | 
+ k      | integer |           |          | 
+Indexes:
+    "tbl_create_index_ij" UNIQUE, btree (i, j)
+    "tbl_create_index_ijk" UNIQUE, btree (i, j, k)
+Distributed by: (i, j)
+
+DROP INDEX tbl_create_index_ij;
+DROP INDEX tbl_create_index_ijk;
+ALTER TABLE tbl_create_index ADD CONSTRAINT PKEY PRIMARY KEY(i, j, k);
+\d tbl_create_index
+          Table "public.tbl_create_index"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ i      | integer |           | not null | 
+ j      | integer |           | not null | 
+ k      | integer |           | not null | 
+Indexes:
+    "pkey" PRIMARY KEY, btree (i, j, k)
+Distributed by: (i, j)
+
+ALTER TABLE tbl_create_index DROP CONSTRAINT PKEY;
+-- after changing the distribution keys, the above failed clause should success
+ALTER TABLE tbl_create_index SET DISTRIBUTED BY(k);
+CREATE UNIQUE INDEX ON tbl_create_index(k);
+CREATE UNIQUE INDEX ON tbl_create_index(i, k);
+ALTER TABLE tbl_create_index ADD CONSTRAINT PKEY PRIMARY KEY(i, k);
+\d tbl_create_index
+          Table "public.tbl_create_index"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ i      | integer |           | not null | 
+ j      | integer |           | not null | 
+ k      | integer |           | not null | 
+Indexes:
+    "pkey" PRIMARY KEY, btree (i, k)
+    "tbl_create_index_i_k_idx" UNIQUE, btree (i, k)
+    "tbl_create_index_k_idx" UNIQUE, btree (k)
+Distributed by: (k)
+
+DROP TABLE tbl_create_index;
+-- create partition table with dist keys (a,b,c)
+CREATE TABLE foo1 (a int, b int, c int)  DISTRIBUTED BY (a,b,c) PARTITION BY RANGE(a)
+(PARTITION p1 START (1) END (10000) INCLUSIVE,
+PARTITION p2 START (10001) END (100000) INCLUSIVE,
+PARTITION p3 START (100001) END (1000000) INCLUSIVE);
+-- create unique index with same keys but different order (a,c,b)
+create unique index acb_idx on public.foo1 using btree(a,c,b);
+-- alter table by add partition
+alter table public.foo1 add partition p4 START (1000001) END (2000000) INCLUSIVE;
+-- check the status of the new partition: new dist keys should be consistent
+-- to the parent table
+\d+ foo1_1_prt_p4
+                               Table "public.foo1_1_prt_p4"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ a      | integer |           |          |         | plain   |              | 
+ b      | integer |           |          |         | plain   |              | 
+ c      | integer |           |          |         | plain   |              | 
+Partition of: foo1 FOR VALUES FROM (1000001) TO (2000001)
+Partition constraint: ((a IS NOT NULL) AND (a >= 1000001) AND (a < 2000001))
+Indexes:
+    "foo1_1_prt_p4_a_c_b_idx" UNIQUE, btree (a, c, b)
+Distributed by: (a, b, c)
+
+-- alter table by split partition
+alter table public.foo1 split partition p1 at(500) into (partition p1_0, partition p1_1);
+-- check the status of the split partitions: new dist keys should be consistent
+-- to the parent table
+\d+ foo1_1_prt_p1_0
+                              Table "public.foo1_1_prt_p1_0"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ a      | integer |           |          |         | plain   |              | 
+ b      | integer |           |          |         | plain   |              | 
+ c      | integer |           |          |         | plain   |              | 
+Partition of: foo1 FOR VALUES FROM (1) TO (500)
+Partition constraint: ((a IS NOT NULL) AND (a >= 1) AND (a < 500))
+Indexes:
+    "foo1_1_prt_p1_0_a_c_b_idx" UNIQUE, btree (a, c, b)
+Distributed by: (a, b, c)
+
+\d+ foo1_1_prt_p1_1
+                              Table "public.foo1_1_prt_p1_1"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ a      | integer |           |          |         | plain   |              | 
+ b      | integer |           |          |         | plain   |              | 
+ c      | integer |           |          |         | plain   |              | 
+Partition of: foo1 FOR VALUES FROM (500) TO (10001)
+Partition constraint: ((a IS NOT NULL) AND (a >= 500) AND (a < 10001))
+Indexes:
+    "foo1_1_prt_p1_1_a_c_b_idx" UNIQUE, btree (a, c, b)
+Distributed by: (a, b, c)
+
+DROP TABLE foo1;
+-- Coverage to ensure that reltuples, relpages and relallvisible are updated
+-- correctly upon an index build (i.e. CREATE INDEX) on heap tables.
+-- Note: relallvisible is not maintained for indexes.
+CREATE TABLE index_build_relstats_heap(a int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Greenplum Database data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+INSERT INTO index_build_relstats_heap SELECT generate_series(1, 10);
+CREATE INDEX ON index_build_relstats_heap(a);
+-- Validate QEs
+SELECT gp_segment_id, count(*) FROM index_build_relstats_heap
+GROUP BY gp_segment_id ORDER BY gp_segment_id;
+NOTICE:  One or more columns in the following table(s) do not have statistics: index_build_relstats_heap
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+ gp_segment_id | count 
+---------------+-------
+             0 |     5
+             1 |     1
+             2 |     4
+(3 rows)
+
+SELECT gp_segment_id, reltuples, relpages, relallvisible FROM gp_dist_random('pg_class')
+WHERE relname='index_build_relstats_heap' ORDER BY gp_segment_id;
+ gp_segment_id | reltuples | relpages | relallvisible 
+---------------+-----------+----------+---------------
+             0 |         5 |        1 |             0
+             1 |         1 |        1 |             0
+             2 |         4 |        1 |             0
+(3 rows)
+
+SELECT gp_segment_id, reltuples, relpages, relallvisible FROM gp_dist_random('pg_class')
+WHERE relname='index_build_relstats_heap_a_idx' ORDER BY gp_segment_id;
+ gp_segment_id | reltuples | relpages | relallvisible 
+---------------+-----------+----------+---------------
+             0 |         5 |        2 |             0
+             1 |         1 |        2 |             0
+             2 |         4 |        2 |             0
+(3 rows)
+
+-- Validate on QD
+SELECT reltuples, relpages, relallvisible FROM pg_class WHERE relname='index_build_relstats_heap';
+ reltuples | relpages | relallvisible 
+-----------+----------+---------------
+        10 |        3 |             0
+(1 row)
+
+SELECT reltuples, relpages, relallvisible FROM pg_class WHERE relname='index_build_relstats_heap_a_idx';
+ reltuples | relpages | relallvisible 
+-----------+----------+---------------
+        10 |        6 |             0
+(1 row)
+
+-- Run VACUUM to populate relallvisible.
+VACUUM index_build_relstats_heap;
+-- Validate QEs
+SELECT gp_segment_id, relallvisible FROM gp_dist_random('pg_class')
+WHERE relname='index_build_relstats_heap' ORDER BY gp_segment_id;
+ gp_segment_id | relallvisible 
+---------------+---------------
+             0 |             1
+             1 |             1
+             2 |             1
+(3 rows)
+
+SELECT gp_segment_id, relallvisible FROM gp_dist_random('pg_class')
+WHERE relname='index_build_relstats_heap_a_idx' ORDER BY gp_segment_id;
+ gp_segment_id | relallvisible 
+---------------+---------------
+             0 |             0
+             1 |             0
+             2 |             0
+(3 rows)
+
+-- Validate on QD
+SELECT relallvisible FROM pg_class WHERE relname='index_build_relstats_heap';
+ relallvisible 
+---------------
+             3
+(1 row)
+
+SELECT relallvisible FROM pg_class WHERE relname='index_build_relstats_heap_a_idx';
+ relallvisible 
+---------------
+             0
+(1 row)
+
+-- Now drop the index and re-build.
+DROP INDEX index_build_relstats_heap_a_idx;
+CREATE INDEX ON index_build_relstats_heap(a);
+-- Now check that relallvisible remains the same on QEs and QDs.
+-- Validate QEs
+SELECT gp_segment_id, relallvisible FROM gp_dist_random('pg_class')
+WHERE relname='index_build_relstats_heap' ORDER BY gp_segment_id;
+ gp_segment_id | relallvisible 
+---------------+---------------
+             0 |             1
+             1 |             1
+             2 |             1
+(3 rows)
+
+SELECT gp_segment_id, relallvisible FROM gp_dist_random('pg_class')
+WHERE relname='index_build_relstats_heap_a_idx' ORDER BY gp_segment_id;
+ gp_segment_id | relallvisible 
+---------------+---------------
+             0 |             0
+             1 |             0
+             2 |             0
+(3 rows)
+
+-- Validate on QD
+SELECT relallvisible FROM pg_class WHERE relname='index_build_relstats_heap';
+ relallvisible 
+---------------
+             3
+(1 row)
+
+SELECT relallvisible FROM pg_class WHERE relname='index_build_relstats_heap_a_idx';
+ relallvisible 
+---------------
+             0
+(1 row)
+
+-- Limitation: If even one QE is empty in terms of reltuples, we will not update
+-- the relstats on the QD, even though they are updated on the QEs.
+CREATE TABLE index_build_relstats_heap_skew(a int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Greenplum Database data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+CREATE INDEX ON index_build_relstats_heap_skew(a);
+-- Segs 0 and 2 will be empty
+INSERT INTO index_build_relstats_heap SELECT 1 FROM generate_series(1, 10) i;
+-- Validate QEs
+SELECT gp_segment_id, count(*) FROM index_build_relstats_heap
+GROUP BY gp_segment_id ORDER BY gp_segment_id;
+NOTICE:  One or more columns in the following table(s) do not have statistics: index_build_relstats_heap
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+ gp_segment_id | count 
+---------------+-------
+             0 |     5
+             1 |    11
+             2 |     4
+(3 rows)
+
+SELECT gp_segment_id, reltuples, relpages, relallvisible FROM gp_dist_random('pg_class')
+WHERE relname='index_build_relstats_heap_skew' ORDER BY gp_segment_id;
+ gp_segment_id | reltuples | relpages | relallvisible 
+---------------+-----------+----------+---------------
+             0 |         0 |        0 |             0
+             1 |         0 |        0 |             0
+             2 |         0 |        0 |             0
+(3 rows)
+
+SELECT gp_segment_id, reltuples, relpages, relallvisible FROM gp_dist_random('pg_class')
+WHERE relname='index_build_relstats_heap_skew_a_idx' ORDER BY gp_segment_id;
+ gp_segment_id | reltuples | relpages | relallvisible 
+---------------+-----------+----------+---------------
+             0 |         0 |        1 |             0
+             1 |         0 |        1 |             0
+             2 |         0 |        1 |             0
+(3 rows)
+
+-- Validate on QD
+SELECT reltuples, relpages, relallvisible FROM pg_class WHERE relname='index_build_relstats_heap_skew';
+ reltuples | relpages | relallvisible 
+-----------+----------+---------------
+         0 |        0 |             0
+(1 row)
+
+SELECT reltuples, relpages, relallvisible FROM pg_class WHERE relname='index_build_relstats_heap_skew_a_idx';
+ reltuples | relpages | relallvisible 
+-----------+----------+---------------
+         0 |        0 |             0
+(1 row)
+

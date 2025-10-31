@@ -1,0 +1,147 @@
+#############################################################
+#
+# IMPORTANT: Isolation tests are run with gp_role=utility
+# currently in GPDB. Refer isolation_init()
+#
+# Global deadlock detector (gp_enable_global_deadlock_detector)
+# is default to OFF currently. Enable it when we enable these
+# tests in non-utility mode.
+#
+#############################################################
+
+# GPDB_12_MERGE_FEATURE_NOT_SUPPORTED: disabled these tests because Greenplum
+# does not enforce foreign key constraints:
+# fk-contention, fk-partitioned-1, fk-partitioned-2, propagate-lock-delete
+#
+# GPDB_12_MERGE_FEATURE_NOT_SUPPORTED: disabled these tests because Greenplum
+# does not support statement trigger:
+# alter-table-3, create-trigger
+#
+# GPDB_12_MERGE_FEATURE_NOT_SUPPORTED: disabled these tests because Greenplum
+# does not support CREATE INDEX CONCURRENTLY or REINDEX CONCURRENTLY:
+# reindex-concurrently, multiple-cic
+#
+# GPDB_12_MERGE_FEATURE_NOT_SUPPORTED: disabled these tests because Greenplum
+# does not support serializable transactions:
+# read-only-anomaly-2, read-only-anomaly-3, read-write-unique, read-write-unique-2,
+# read-write-unique-3, read-write-unique-4, simple-write-skew, receipt-report, 
+# temporal-range-integrity, project-manager, classroom-scheduling, total-cash, 
+# referential-integrity, ri-trigger, partial-index, two-ids, multiple-row-versions,
+# index-only-scan, predicate-lock-hot-tuple, update-conflict-out, predicate-hash,
+# predicate-gist, predicate-gin, serializable-parallel, serializable-parallel-2,
+# prepared-transactions
+#
+# XXX: these tests are failed due to unknown reasons: eval-plan-qual, tuplelock-update,
+# tuplelock-partition, alter-table-4
+#
+
+test: read-only-anomaly
+#test: read-only-anomaly-2
+#test: read-only-anomaly-3
+#test: read-write-unique
+#test: read-write-unique-2
+#test: read-write-unique-3
+#test: read-write-unique-4
+#test: simple-write-skew
+#test: receipt-report
+#test: temporal-range-integrity
+#test: project-manager
+#test: classroom-scheduling
+#test: total-cash
+#test: referential-integrity
+#test: ri-trigger
+#test: partial-index
+#test: two-ids
+#test: multiple-row-versions
+#test: index-only-scan
+test: deadlock-simple
+test: deadlock-hard
+test: deadlock-soft
+test: deadlock-soft-2
+#test: fk-contention
+test: fk-deadlock
+test: fk-deadlock2
+#test: fk-partitioned-1
+#test: fk-partitioned-2
+#test: eval-plan-qual
+test: eval-plan-qual-trigger
+test: lock-update-delete
+test: lock-update-traversal
+test: inherit-temp
+test: temp-schema-cleanup
+test: insert-conflict-do-nothing
+test: insert-conflict-do-nothing-2
+test: insert-conflict-do-update
+test: insert-conflict-do-update-2
+# insert-conflict-do-update-3 is disabled related to issue https://github.com/greenplum-db/gpdb/issues/15635
+#test: insert-conflict-do-update-3
+test: insert-conflict-toast
+test: insert-conflict-specconflict
+test: delete-abort-savept
+test: delete-abort-savept-2
+test: aborted-keyrevoke
+test: multixact-no-deadlock
+test: multixact-no-forget
+test: lock-committed-update
+test: lock-committed-keyupdate
+test: update-locked-tuple
+#test: reindex-concurrently
+#test: propagate-lock-delete
+test: tuplelock-conflict
+#test: tuplelock-update
+test: tuplelock-upgrade-no-deadlock
+#test: tuplelock-partition
+test: freeze-the-dead
+test: nowait
+test: nowait-2
+test: nowait-3
+test: nowait-4
+test: nowait-5
+test: skip-locked
+test: skip-locked-2
+test: skip-locked-3
+test: skip-locked-4
+test: drop-index-concurrently-1
+#test: multiple-cic
+test: alter-table-1
+test: alter-table-2
+#test: alter-table-3
+#test: alter-table-4
+#test: create-trigger
+test: sequence-ddl
+test: async-notify
+# vacuum-reltuples uses a cursor to keep page pinned, but in GPDB that doesn't
+# keep it pinned.
+#test: vacuum-reltuples
+test: timeouts
+test: vacuum-concurrent-drop
+test: vacuum-conflict
+test: vacuum-skip-locked
+#test: predicate-hash
+#test: predicate-gist
+#test: predicate-gin
+
+test: partition-concurrent-attach
+test: partition-drop-index-locking
+
+# GPDB_12_MERGE_FEATURE_NOT_SUPPORTED: Disabled test partition-key-update-1
+# because it fails when test errors from ExecLockRows. The reason is that
+# GPDB disabled triggers for foreign keys.
+#test: partition-key-update-1
+test: partition-key-update-2
+test: partition-key-update-3
+test: partition-key-update-4
+test: plpgsql-toast
+test: truncate-conflict
+#test: serializable-parallel
+#test: serializable-parallel-2
+
+#test: prepared-transactions
+
+# GPDB-specific tests
+test: heap-repeatable-read-vacuum-freeze
+test: heap-repeatable-read-vacuum
+test: ao-repeatable-read-vacuum
+
+test: ao-insert-eof create_index_hot udf-insert-deadlock heap-repeatable-read ao-repeatable-read
+test: vacuum-ao-concurrent-drop

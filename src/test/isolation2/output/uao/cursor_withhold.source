@@ -1,0 +1,53 @@
+-- @Description Tests the visibility of an "with hold" cursor w.r.t. deletes.
+--
+DROP TABLE IF EXISTS ao;
+DROP TABLE
+CREATE TABLE ao (a INT) USING @amname@;
+CREATE TABLE
+insert into ao select generate_series(1,100);
+INSERT 0 100
+
+1: DECLARE cur CURSOR WITH HOLD FOR SELECT a FROM ao ORDER BY a;
+DECLARE CURSOR
+1: FETCH NEXT IN cur;
+ a 
+---
+ 1 
+(1 row)
+1: FETCH NEXT IN cur;
+ a 
+---
+ 2 
+(1 row)
+2: BEGIN;
+BEGIN
+2: DELETE FROM ao WHERE a < 5;
+DELETE 4
+2: COMMIT;
+COMMIT
+1: FETCH NEXT IN cur;
+ a 
+---
+ 3 
+(1 row)
+1: FETCH NEXT IN cur;
+ a 
+---
+ 4 
+(1 row)
+1: FETCH NEXT IN cur;
+ a 
+---
+ 5 
+(1 row)
+1: CLOSE cur;
+CLOSE CURSOR
+3: DECLARE cur CURSOR WITH HOLD FOR SELECT a FROM ao ORDER BY a;
+DECLARE CURSOR
+3: FETCH NEXT IN cur;
+ a 
+---
+ 5 
+(1 row)
+3: CLOSE cur;
+CLOSE CURSOR
